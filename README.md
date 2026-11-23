@@ -4,6 +4,8 @@ Web remote + video caster for old Samsung Tizen TVs. I have a 2016 UN50KU6000, t
 
 One Python script. It runs a small web page on your PC that you open on your phone: remote, volume, installed apps, and a list of videos from `~/Downloads` that play on the TV over DLNA. You can also paste a YouTube/Twitch link, or (on Hyprland) send a PC window to the TV.
 
+Torrents go through [Stremio](https://www.stremio.com/): start something in Stremio on the PC and its stream link shows up on the remote, ready to send to the TV. Plain magnet links don't work.
+
 <p align="center"><img src="docs/phone.webp" width="600" alt="Phone: remote and the media drawer"></p>
 <p align="center"><img src="docs/pc.webp" alt="PC layout"></p>
 
