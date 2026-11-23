@@ -10,7 +10,7 @@
   tv yt <url>     open a YouTube video on the TV
   tv netflix      open the Netflix app on the TV
   tv play <file>  play a local video file on the TV via DLNA (keep running while watching)
-  tv play <url>   play a video URL on the TV (localhost links are rewritten to this PC's IP);
+  tv play <url>   play a video URL or magnet link on the TV (localhost links are rewritten to this PC's IP);
                   a page link (Twitch, Kick…) is opened with yt-dlp
   tv serve        web remote on port 8765 (phone/PC browser), lists videos in ~/Downloads
 
@@ -625,7 +625,9 @@ def start(src, audio=None, sub=None):
 
 
 def play(src):
-    if not src.startswith(("http://", "https://")):
+    if src.startswith("magnet:"):
+        src = magnet_url(src)
+    elif not src.startswith(("http://", "https://")):
         src = os.path.abspath(src)
         if not os.path.isfile(src):
             sys.exit(f"file not found: {src}")
@@ -680,6 +682,52 @@ def stremio_stream():
             if best is None or score > best[0]:
                 best = (score, url)
     return best[1] if best else None
+
+
+STREMIO = "http://127.0.0.1:11470"
+STREMIO_SERVERS = (["flatpak", "run", "--command=node", "com.stremio.Stremio", "/app/libexec/stremio/server.js"],
+                   ["node", "/opt/stremio/server.js"])
+
+
+def stremio_server():
+    """Make sure Stremio's torrent streaming server is up; start it headless if the app isn't open."""
+    for cmd in [None, *STREMIO_SERVERS]:
+        if cmd:
+            try:
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            except OSError:
+                continue
+        for _ in range(20 if cmd else 1):
+            try:
+                return urllib.request.urlopen(f"{STREMIO}/stats.json", timeout=1).close()
+            except OSError:
+                time.sleep(0.5)
+    raise ValueError("magnet links need Stremio installed (its server streams the torrent)")
+
+
+def magnet_url(magnet):
+    """Stream URL of the biggest video in a magnet link, served by Stremio's torrent engine."""
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(magnet).query)
+    ih = next((x[9:] for x in q.get("xt", []) if x.lower().startswith("urn:btih:")), "")
+    if len(ih) == 32:
+        ih = base64.b32decode(ih.upper()).hex()
+    if len(ih) != 40 or any(c not in "0123456789abcdef" for c in ih.lower()):
+        raise ValueError("that magnet link has no valid info hash")
+    ih = ih.lower()
+    stremio_server()
+    body = {"torrent": {"infoHash": ih}, "peerSearch": {"min": 40, "max": 150,
+            "sources": [f"dht:{ih}", *(f"tracker:{t}" for t in q.get("tr", []))]}}
+    try:
+        req = urllib.request.Request(f"{STREMIO}/{ih}/create", json.dumps(body).encode(), {"Content-Type": "application/json"})
+        files = json.load(urllib.request.urlopen(req, timeout=60)).get("files") or []
+    except (OSError, ValueError):
+        raise ValueError("couldn't get the torrent's files (no peers?)")
+    vids = [(f.get("length", 0), i, f["name"]) for i, f in enumerate(files)
+            if os.path.splitext(f.get("name", ""))[1].lower() in VIDEO_EXT]
+    if not vids:
+        raise ValueError("no video in that torrent")
+    _, i, name = max(vids)
+    return f"{STREMIO}/{ih}/{i}/{urllib.parse.quote(os.path.basename(name))}"
 
 
 class WebHandler(http.server.BaseHTTPRequestHandler):
@@ -814,7 +862,7 @@ def source(d):
     if d.get("url"):
         url = str(d["url"]).strip()
         if url.startswith("magnet:"):
-            raise ValueError("torrent links aren't supported")
+            return magnet_url(url)
         if url.startswith("stremio:") or "stremio.com/#/detail" in url:
             raise ValueError("that's the link to the movie page, not to the video")
         if not url.startswith(("http://", "https://")):

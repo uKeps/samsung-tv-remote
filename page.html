@@ -368,7 +368,7 @@ function go(){post('/play',{...cur,audio:aud.value===''?null:+aud.value,sub:sub.
 
 // Media field: a link plays (pasting starts it right away), anything else filters the videos.
 // An active Stremio stream on the PC pre-fills it.
-const lk=$('lk'),lki=lk.u,isUrl=u=>/^https?:\/\/|youtu/.test(u);let lastStream='';
+const lk=$('lk'),lki=lk.u,isUrl=u=>/^(https?:\/\/|magnet:)|youtu/.test(u);let lastStream='';
 function fillLink(u){if(u&&u!==lastStream&&document.activeElement!==lki&&(!lki.value||lki.value===lastStream)){lki.value=lastStream=u;filter()}}
 function filter(){const q=isUrl(lki.value)?'':lki.value.trim().toLowerCase();let n=0;
  for(const b of $('files').querySelectorAll('button')){const show=b.dataset.f.toLowerCase().includes(q);b.hidden=!show;n+=show}
