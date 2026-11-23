@@ -1,0 +1,12 @@
+[Unit]
+Description=Samsung TV web remote
+After=network-online.target
+
+[Service]
+Environment=PATH=%h/.local/bin:/usr/bin
+ExecStart=%h/.local/bin/tv serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

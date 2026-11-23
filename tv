@@ -1,0 +1,897 @@
+#!/usr/bin/env -S uv run --quiet --script
+# /// script
+# dependencies = ["websocket-client", "yt-dlp"]
+# ///
+"""Control a Samsung Smart TV (2016-2017 Tizen, e.g. UN50KU6000) over the LAN.
+
+  tv              interactive remote (arrows, enter, etc. — press ? for help)
+  tv <key>...     send keys, e.g. `tv off`, `tv vol+ vol+`, `tv home`
+  tv on           power the TV on (Wake-on-LAN)
+  tv yt <url>     open a YouTube video on the TV
+  tv netflix      open the Netflix app on the TV
+  tv play <file>  play a local video file on the TV via DLNA (keep running while watching)
+  tv play <url>   play a video URL on the TV (localhost links are rewritten to this PC's IP);
+                  a page link (Twitch, Kick…) is opened with yt-dlp
+  tv serve        web remote on port 8765 (phone/PC browser), lists videos in ~/Downloads
+
+Settings come from the environment or ~/.config/tv-remote.env (KEY=value lines):
+  TV_MAC      the TV's Wi-Fi MAC: needed to power it on, and picks the TV when there are several
+  TV_IP       optional; the TV is found on the LAN when it's empty or stale
+  TV_MONITOR  monitor streamed by "send a PC window" (Hyprland), default HDMI-A-1
+  VIDEO_DIR   folder listed on the web remote, default ~/Downloads
+  WEB_PORT    web remote port, default 8765
+"""
+import base64, http.server, json, mimetypes, os, pathlib, socket, subprocess, sys, termios, threading, time, tty, urllib.error, urllib.parse, urllib.request
+from xml.sax.saxutils import escape
+import websocket
+
+_CONF = pathlib.Path.home() / ".config/tv-remote.env"
+for _ln in _CONF.read_text().splitlines() if _CONF.is_file() else []:
+    _k, _, _v = _ln.partition("=")
+    if _v and not _ln.lstrip().startswith("#"):
+        os.environ.setdefault(_k.strip(), _v.strip().strip('"'))
+TV_IP = os.environ.get("TV_IP", "")  # last known address; found again via SSDP when DHCP changes it
+TV_MAC = os.environ.get("TV_MAC", "").lower()
+
+
+def find_tv():
+    """Locate the TV via SSDP (the one with TV_MAC, or the first Samsung TV when it's unset).
+    Returns True if found (and updates TV_IP)."""
+    global TV_IP, _ws
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(my_ip()))
+        s.settimeout(2)
+        s.sendto(b'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\n'
+                 b'MX: 1\r\nST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n', ("239.255.255.250", 1900))
+        ips = set()
+        try:
+            while True:
+                ips.add(s.recvfrom(4096)[1][0])
+        except socket.timeout:
+            pass
+    for ip in ips:
+        try:
+            info = json.load(urllib.request.urlopen(f"http://{ip}:8001/api/v2/", timeout=2))
+        except (OSError, ValueError):
+            continue
+        mac = info.get("device", {}).get("wifiMac", "").lower()
+        if mac and (not TV_MAC or mac == TV_MAC):
+            TV_IP, _ws = ip, None
+            return True
+    return False
+
+
+def wake(timeout=25):
+    """Power the TV on with Wake-on-LAN (works while "Power On with Mobile" is enabled on the TV)."""
+    if not TV_MAC:
+        raise ValueError("set TV_MAC to power the TV on (see `tv help`)")
+    pkt = b"\xff" * 6 + bytes.fromhex(TV_MAC.replace(":", "")) * 16
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        for dst in ("255.255.255.255", TV_IP) if TV_IP else ("255.255.255.255",):
+            for _ in range(3):
+                s.sendto(pkt, (dst, 9))
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            socket.create_connection((TV_IP, 8001), timeout=1).close()
+            return True
+        except OSError:
+            time.sleep(1)
+    return find_tv()  # it may have woken up on a new DHCP address
+
+
+def ensure_tv():
+    """Rediscover the TV if it stopped answering at TV_IP."""
+    try:
+        socket.create_connection((TV_IP, 8001), timeout=1).close()
+    except OSError:
+        if not find_tv() and not TV_IP:
+            raise ValueError("no Samsung TV found on the network (is it on? or set TV_IP)")
+
+KEYS = {
+    "off": "KEY_POWER", "power": "KEY_POWER",
+    "up": "KEY_UP", "down": "KEY_DOWN", "left": "KEY_LEFT", "right": "KEY_RIGHT",
+    "ok": "KEY_ENTER", "back": "KEY_RETURN", "home": "KEY_HOME", "menu": "KEY_MENU",
+    "vol+": "KEY_VOLUP", "vol-": "KEY_VOLDOWN", "mute": "KEY_MUTE",
+    "ch+": "KEY_CHUP", "ch-": "KEY_CHDOWN", "source": "KEY_SOURCE",
+    "play": "KEY_PLAY", "pause": "KEY_PAUSE", "stop": "KEY_STOP", "tools": "KEY_TOOLS", "info": "KEY_INFO",
+    "ff": "KEY_FF", "rew": "KEY_REWIND",
+}
+
+# Interactive mode: terminal key -> TV key
+INTERACTIVE = {
+    "\x1b[A": "KEY_UP", "\x1b[B": "KEY_DOWN", "\x1b[D": "KEY_LEFT", "\x1b[C": "KEY_RIGHT",
+    "\r": "KEY_ENTER", "\x7f": "KEY_RETURN", "h": "KEY_HOME", "+": "KEY_VOLUP",
+    "=": "KEY_VOLUP", "-": "KEY_VOLDOWN", "m": "KEY_MUTE", " ": "KEY_PLAY",
+    "p": "KEY_PAUSE", "s": "KEY_SOURCE", "o": "KEY_POWER", "f": "KEY_FF", "r": "KEY_REWIND",
+}
+HELP = """\
+arrows = navigate  Enter = OK   Backspace = back   h = home
++/- = volume       m = mute     space = play       p = pause
+f/r = fast-forward/rewind       s = source (HDMI)  o = power off
+/ = type text (with the TV's keyboard open)        q = quit"""
+
+
+def connect():
+    name = base64.b64encode(b"PC").decode()
+    ws = websocket.create_connection(
+        f"ws://{TV_IP}:8001/api/v2/channels/samsung.remote.control?name={name}", timeout=30)
+    # TV may show an "allow this device?" prompt the first time; wait for the handshake.
+    if json.loads(ws.recv()).get("event") != "ms.channel.connect":
+        sys.exit("the TV refused the connection (accept the prompt on the TV and try again)")
+    return ws
+
+
+def send(ws, key):
+    ws.send(json.dumps({"method": "ms.remote.control", "params": {
+        "Cmd": "Click", "DataOfCmd": key, "Option": "false", "TypeOfRemote": "SendRemoteKey"}}))
+
+
+def send_text(ws, text):
+    ws.send(json.dumps({"method": "ms.remote.control", "params": {
+        "Cmd": base64.b64encode(text.encode()).decode(), "DataOfCmd": "base64",
+        "TypeOfRemote": "SendInputString"}}))
+    time.sleep(0.3)
+    # Newer firmware waits for this before committing the text to the field.
+    ws.send(json.dumps({"method": "ms.remote.control", "params": {"TypeOfRemote": "SendInputEnd"}}))
+
+
+_ws, _ws_used, _ws_lock = None, 0.0, threading.Lock()
+
+
+def press(key=None, text=None, mouse=None, emit=None):
+    """Send via a kept-open connection: the TV drops commands if the socket closes right after.
+    Reconnects when idle, since the TV may silently drop old connections."""
+    global _ws, _ws_used
+    with _ws_lock:
+        if _ws is None or time.monotonic() - _ws_used > 30:
+            if _ws:
+                _ws.close()
+            _ws = None
+            _ws = connect()
+            time.sleep(0.5)  # TV drops the first command sent right after connecting
+        try:
+            if emit:
+                _ws.send(json.dumps({"method": "ms.channel.emit", "params": {**emit, "to": "host"}}))
+            elif mouse:
+                _ws.send(json.dumps({"method": "ms.remote.control",
+                                     "params": {**mouse, "TypeOfRemote": "ProcessMouseDevice"}}))
+            elif key:
+                send(_ws, key)
+            else:
+                send_text(_ws, text)
+        except (OSError, websocket.WebSocketException):
+            _ws = None
+            raise
+        _ws_used = time.monotonic()
+
+
+def dial(app, body=b""):
+    """Launch a TV app via DIAL (port 8080)."""
+    req = urllib.request.Request(f"http://{TV_IP}:8080/ws/apps/{app}",
+                                 data=body, headers={"Content-Type": "text/plain"})
+    urllib.request.urlopen(req, timeout=10)
+
+
+_apps = None
+
+
+def apps():
+    """Installed apps as [{id, name, type}]. Cached once the TV answers.
+    Uses its own connection so the reply doesn't sit unread on the shared one."""
+    # ponytail: cached until restart, so apps installed later need `systemctl --user restart tv-remote`.
+    global _apps
+    if _apps:
+        return _apps
+    ws = connect()
+    try:
+        ws.settimeout(5)
+        time.sleep(0.5)  # TV drops the first command sent right after connecting
+        ws.send(json.dumps({"method": "ms.channel.emit", "params": {"event": "ed.installedApp.get", "to": "host"}}))
+        while (msg := json.loads(ws.recv())).get("event") != "ed.installedApp.get":
+            pass
+    finally:
+        ws.close()
+    _apps = [{"id": a["appId"], "name": a["name"], "type": a["app_type"]} for a in msg["data"]["data"]]
+    return _apps
+
+
+def launch(app_id):
+    app = next((a for a in apps() if a["id"] == app_id), None)
+    if not app:
+        raise ValueError("unknown app")
+    # Store apps (type 2) open by deep link; built-ins like the browser (type 4) need a native launch.
+    press(emit={"event": "ed.apps.launch", "data": {
+        "appId": app_id, "action_type": "DEEP_LINK" if app["type"] == 2 else "NATIVE_LAUNCH", "metaTag": ""}})
+    return app["name"]
+
+
+def youtube(url):
+    u = urllib.parse.urlparse(url)
+    vid = (urllib.parse.parse_qs(u.query).get("v") or [u.path.rstrip("/").split("/")[-1]])[0]
+    dial("YouTube", f"v={vid}".encode())
+
+
+# What the media server is currently serving to the TV.
+MEDIA = {"src": "", "is_file": True, "audio": None, "sub": None, "pipe": False}
+# DLNA flags for a live, non-seekable transcode — Samsung won't play a length-less stream without them.
+LIVE_DLNA = "DLNA.ORG_OP=00;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+# Byte-range seekable file: lets the TV accept Seek (UPnP 701 otherwise).
+FILE_DLNA = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+# Mirroring: the TV shows this physical monitor (`gpu-screen-recorder --list-capture-options`).
+# A Hyprland headless output only the TV sees was tried and dropped: creating it made the NVIDIA driver
+# fail its allocations and crashed Quickshell (2026-11-01).
+# Sound: the apps shown on TV_MONITOR play into TV_SINK, a null sink only the recording hears,
+# so Spotify & co. stay on the PC.
+TV_MONITOR, TV_SINK = os.environ.get("TV_MONITOR", "HDMI-A-1"), "tv_mirror"
+MIRROR_CMD = ["gpu-screen-recorder", "-w", TV_MONITOR, "-c", "mpegts", "-k", "h264", "-f", "30",
+              "-bm", "cbr", "-q", "8000", "-keyint", "1", "-a", f"{TV_SINK}.monitor", "-ac", "aac"]  # -q: kbps
+# The PC's sound is often turned way down (headphones, a site's player); measured -53 LUFS on the TV.
+# Normalize it so the TV plays it at its usual volume: ~-18 LUFS, +40 dB max, silence below -70 dB left alone.
+MIRROR_AUDIO = "dynaudnorm=f=150:g=7:p=0.6:m=100:t=0.0003"
+# The TV turned off or stopped from its own remote stops pulling the stream; after this many seconds
+# the windows and sound go back to the PC by themselves.
+MIRROR_IDLE = 30
+_mirror_seen = 0.0  # last time the TV read a chunk of the mirror stream
+TEXT_SUBS = {"subrip", "ass", "ssa", "mov_text", "webvtt", "text"}
+
+
+def ff_input(src):
+    """ffmpeg/ffprobe input args. URLs are limited to network protocols (no file:// tricks)."""
+    if src.startswith(("http://", "https://")):
+        return ["-protocol_whitelist", "http,https,tcp,tls,crypto", "-i", src]
+    return ["-i", src]
+
+
+def content_type(url):
+    try:
+        return urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=15).headers.get_content_type()
+    except urllib.error.HTTPError:
+        return "text/html"  # some sites refuse HEAD; let yt-dlp try the page
+
+
+def page_video(url):
+    """Direct stream URL and title behind a web page (Twitch, Kick, …), via yt-dlp."""
+    import yt_dlp  # slow import; only the page path needs it
+    opts = {"format": "b[height<=1080]/b", "quiet": True, "no_warnings": True, "noplaylist": True}
+    try:
+        with yt_dlp.YoutubeDL(opts) as y:
+            info = y.extract_info(url, download=False)
+    except yt_dlp.utils.DownloadError:
+        info = {}
+    if not info.get("url"):
+        raise ValueError("no video found on that page")
+    # ponytail: info["http_headers"] (Referer etc.) isn't passed to ffmpeg; add it when a site needs it.
+    height = f" · {info['height']}p" if info.get("height") else ""  # shows the picked quality on the page
+    return info["url"], (info.get("title") or "video") + height
+
+
+def probe(src):
+    if src.startswith(("http://", "https://")) and content_type(src) == "text/html":
+        return {"audio": [], "subs": []}  # a page: yt-dlp picks the stream at play time
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", *ff_input(src)],
+                         capture_output=True, text=True, timeout=60)
+    if out.returncode:
+        raise ValueError("couldn't open that link as a video")
+    audio, subs = [], []
+    for st in json.loads(out.stdout)["streams"]:
+        t = st.get("tags", {})
+        label = " · ".join(x for x in (t.get("title"), t.get("language"), st.get("codec_name")) if x)
+        if st["codec_type"] == "audio":
+            audio.append({"i": len(audio), "label": label})
+        elif st["codec_type"] == "subtitle":
+            # Image subs (PGS/VobSub) can't be converted to SRT; keep the index, mark them unusable.
+            subs.append({"i": len(subs), "label": label, "ok": st.get("codec_name") in TEXT_SUBS})
+    return {"audio": audio, "subs": subs}
+
+
+class MediaHandler(http.server.BaseHTTPRequestHandler):
+    """Serves MEDIA to the TV: the file with Range support, an ffmpeg remux when another
+    audio track was chosen, and the chosen subtitle as SRT."""
+
+    def do_HEAD(self):
+        self.do_GET(body=False)
+
+    def do_GET(self, body=True):
+        m = MEDIA
+        try:
+            if self.path.endswith(".srt"):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/srt; charset=utf-8")
+                self.send_header("Content-Length", str(len(m["sub"] or b"")))
+                self.end_headers()
+                if body:
+                    self.wfile.write(m["sub"] or b"")
+            elif self.path.startswith("/pipe"):
+                self.pipe(m, body)
+            else:
+                self.file(m, body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # TV dropped the connection (seek/stop) — normal
+
+    def common_headers(self, m):
+        self.send_header("transferMode.dlna.org", "Streaming")
+        if m["sub"]:
+            self.send_header("CaptionInfo.sec", f"http://{self.server.server_address[0]}:{self.server.server_port}/s.srt")
+
+    def file(self, m, body):
+        size = os.path.getsize(m["src"])
+        start, end = 0, size - 1
+        rng = self.headers.get("Range", "")
+        if rng.startswith("bytes="):
+            a, _, b = rng[6:].split(",")[0].partition("-")
+            start, end = (int(a), int(b) if b else size - 1) if a else (size - int(b), size - 1)
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        else:
+            self.send_response(200)
+        self.send_header("Content-Type", mime_for(m["src"]))
+        self.send_header("Content-Length", str(end - start + 1))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("contentFeatures.dlna.org", FILE_DLNA)
+        self.common_headers(m)
+        self.end_headers()
+        if not body:
+            return
+        with open(m["src"], "rb") as f:
+            f.seek(start)
+            left = end - start + 1
+            while left > 0 and (chunk := f.read(min(1 << 20, left))):
+                self.wfile.write(chunk)
+                left -= len(chunk)
+
+    def pipe(self, m, body):
+        # ponytail: live remux has no Range support, so seeking is off; a temp remuxed file would fix that.
+        self.send_response(200)
+        self.send_header("Content-Type", "video/mpeg")
+        self.send_header("contentFeatures.dlna.org", LIVE_DLNA)
+        self.common_headers(m)
+        self.end_headers()
+        if not body:
+            return
+        rec = None
+        if m["src"] == "screen":
+            rec = subprocess.Popen(MIRROR_CMD, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=session_env())
+            proc = subprocess.Popen(["ffmpeg", "-v", "error", "-i", "pipe:0", "-map", "0", "-c:v", "copy",
+                                     "-af", MIRROR_AUDIO, "-c:a", "aac", "-b:a", "160k", "-f", "mpegts", "-"],
+                                    stdin=rec.stdout, stdout=subprocess.PIPE)
+        else:
+            proc = subprocess.Popen(["ffmpeg", "-v", "error", *ff_input(m["src"]), "-map", "0:v:0",
+                                     "-map", f"0:a:{m['audio'] or 0}?", "-c", "copy", "-f", "mpegts", "-"],
+                                    stdout=subprocess.PIPE)
+        global _mirror_seen
+        try:
+            while chunk := proc.stdout.read(1 << 16):
+                self.wfile.write(chunk)
+                if rec:
+                    _mirror_seen = time.monotonic()
+        finally:
+            proc.kill()
+            if rec:
+                rec.kill()
+
+    def log_message(self, *a):
+        pass
+
+
+def soap(action, args, svc="AVTransport"):
+    body = (f'<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+            f's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
+            f'<u:{action} xmlns:u="urn:schemas-upnp-org:service:{svc}:1"><InstanceID>0</InstanceID>'
+            f'{args}</u:{action}></s:Body></s:Envelope>')
+    req = urllib.request.Request(f"http://{TV_IP}:9197/upnp/control/{svc}1", data=body.encode(), headers={
+        "Content-Type": 'text/xml; charset="utf-8"',
+        "SOAPAction": f'"urn:schemas-upnp-org:service:{svc}:1#{action}"'})
+    return urllib.request.urlopen(req, timeout=10).read().decode()
+
+
+def volume(v=None):
+    """Read the volume (0-100) and mute, or set the volume first when `v` is given."""
+    if v is not None:
+        soap("SetVolume", f"<Channel>Master</Channel><DesiredVolume>{v}</DesiredVolume>", "RenderingControl")
+    ch = "<Channel>Master</Channel>"
+    return {"vol": int(_tag(soap("GetVolume", ch, "RenderingControl"), "CurrentVolume") or 0),
+            "mute": _tag(soap("GetMute", ch, "RenderingControl"), "CurrentMute") == "1"}
+
+
+def _tag(xml, tag):
+    return xml.split(f"<{tag}>")[1].split("<")[0] if f"<{tag}>" in xml else ""
+
+
+def _secs(hms):
+    try:
+        h, m, sec = hms.split(".")[0].split(":")
+        return int(h) * 3600 + int(m) * 60 + int(sec)
+    except ValueError:
+        return 0  # NOT_IMPLEMENTED / empty while the TV loads
+
+
+def status():
+    """What the TV's player is doing: state, position and duration in seconds."""
+    pos = soap("GetPositionInfo", "")
+    return {"state": _tag(soap("GetTransportInfo", ""), "CurrentTransportState"),
+            "pos": _secs(_tag(pos, "RelTime")), "dur": _secs(_tag(pos, "TrackDuration")),
+            "title": MEDIA.get("title", ""), "seekable": not MEDIA["pipe"], "pipe": MEDIA["pipe"]}
+
+
+def seek_to(t):
+    """Jump to second `t`. Returns the target as h:mm:ss."""
+    if MEDIA["pipe"]:
+        raise ValueError("this video can't be seeked")
+    dur = status()["dur"]
+    t = max(0, min(t, dur - 1) if dur else t)
+    target = f"{t // 3600}:{t // 60 % 60:02}:{t % 60:02}"
+    soap("Seek", f"<Unit>REL_TIME</Unit><Target>{target}</Target>")
+    return target
+
+
+def seek(delta):
+    return seek_to(status()["pos"] + delta)
+
+
+def cast(url, title, mime, sub_url=None):
+    try:
+        soap("Stop", "")  # a TV stuck mid-transition refuses new media (UPnP 701)
+    except urllib.error.HTTPError:
+        pass
+    # Samsung picks up external subtitles from its own sec:CaptionInfo tags.
+    sub = (f'<sec:CaptionInfoEx sec:type="srt">{escape(sub_url)}</sec:CaptionInfoEx>'
+           f'<sec:CaptionInfo sec:type="srt">{escape(sub_url)}</sec:CaptionInfo>'
+           f'<res protocolInfo="http-get:*:text/srt:*">{escape(sub_url)}</res>') if sub_url else ""
+    didl = ('<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
+            'xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" '
+            'xmlns:sec="http://www.sec.co.kr/">'
+            f'<item id="0" parentID="-1" restricted="1"><dc:title>{escape(title)}</dc:title>'
+            '<upnp:class>object.item.videoItem</upnp:class>'
+            f'<res protocolInfo="http-get:*:{mime}:{LIVE_DLNA if "/pipe" in url else FILE_DLNA}">{escape(url)}</res>{sub}</item></DIDL-Lite>')
+    soap("SetAVTransportURI", f"<CurrentURI>{escape(url)}</CurrentURI><CurrentURIMetaData>{escape(didl)}</CurrentURIMetaData>")
+    soap("Play", "<Speed>1</Speed>")
+
+
+def mime_for(path):
+    mime = mimetypes.guess_type(path)[0] or "video/x-mkv"
+    # Samsung rejects the standard Matroska MIME type (UPnP 714).
+    return {"video/x-matroska": "video/x-mkv", "video/webm": "video/x-mkv"}.get(mime, mime)
+
+
+def my_ip():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect((TV_IP or "10.255.255.255", 1))  # no packet is sent; just picks the LAN interface
+        return s.getsockname()[0]
+
+
+def local_url(url):
+    # "localhost" on the TV is the TV itself — point it at this PC instead.
+    u = urllib.parse.urlparse(url)
+    if u.hostname in ("localhost", "127.0.0.1"):
+        url = u._replace(netloc=u.netloc.replace(u.hostname, my_ip())).geturl()
+    return url
+
+
+_media_srv = None
+
+
+def media_base():
+    """Base URL of the media server the TV pulls from, started on first use."""
+    global _media_srv
+    ip = my_ip()
+    if _media_srv is None:
+        _media_srv = http.server.ThreadingHTTPServer((ip, 0), MediaHandler)
+        # Serve before SetAVTransportURI: the TV probes the URL right away (UPnP 716 otherwise).
+        threading.Thread(target=_media_srv.serve_forever, daemon=True).start()
+    return f"http://{ip}:{_media_srv.server_port}"
+
+
+def session_env():
+    """Env for the Hyprland session running now. The service can start before it (boot) or outlive
+    it (re-login), so what it inherited is stale; `hyprctl instances` works without it."""
+    out = subprocess.run(["hyprctl", "instances", "-j"], capture_output=True, text=True, timeout=5).stdout
+    insts = json.loads(out or "[]")
+    if not insts:
+        raise ValueError("Hyprland isn't running")
+    inst = max(insts, key=lambda i: i["time"])
+    return {**os.environ, "HYPRLAND_INSTANCE_SIGNATURE": inst["instance"], "WAYLAND_DISPLAY": inst["wl_socket"]}
+
+
+def hypr(*args):
+    out = subprocess.run(["hyprctl", *args], capture_output=True, text=True, timeout=5, env=session_env()).stdout
+    return json.loads(out) if "-j" in args else out
+
+
+def monitors():
+    return {m["name"]: m for m in hypr("monitors", "-j")}
+
+
+# Private browser windows stay off the list: the page (and these titles) is open to the whole LAN.
+PRIVATE_TITLES = ("private browsing", "incognito", "inprivate", "navegação privada", "anônima")  # en + pt-BR
+
+
+def windows():
+    """PC windows that can be sent to the TV (not special workspaces or private ones)."""
+    return [{"id": c["address"], "title": f'{c["title"] or c["class"]} · workspace {c["workspace"]["name"]}'}
+            for c in hypr("clients", "-j") if c.get("mapped") and c["workspace"].get("id", -1) > 0
+            and not any(p in c["title"].lower() for p in PRIVATE_TITLES)]
+
+
+def pactl(*args):
+    return subprocess.run(["pactl", *args], capture_output=True, text=True, timeout=5).stdout
+
+
+def ancestors(pid):
+    """pid and its parents: a browser's sound can come from a child process of the window's."""
+    out = []
+    while pid > 1 and len(out) < 50:
+        out.append(pid)
+        try:
+            pid = int(pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+    return out
+
+
+_mirroring = False
+
+
+def route_audio():
+    """While mirroring, the sound of the apps shown on TV_MONITOR plays on the TV (TV_SINK) and the rest on
+    the PC. Checked every second, so it follows workspace switches and new streams (e.g. after an ad)."""
+    # ponytail: per process, not per window; every window of the same browser plays on the TV.
+    while _mirroring:
+        if time.monotonic() - _mirror_seen > MIRROR_IDLE:
+            unmirror()  # nobody is watching: don't leave the PC's sound on a dead TV
+            break
+        ws = monitors().get(TV_MONITOR, {}).get("activeWorkspace", {}).get("id")
+        shown = {c["pid"] for c in hypr("clients", "-j") if c["workspace"].get("id") == ws}
+        sink = next((ln.split("\t")[0] for ln in pactl("list", "short", "sinks").splitlines()
+                     if ln.split("\t")[1:2] == [TV_SINK]), None)
+        for s in json.loads(pactl("-f", "json", "list", "sink-inputs") or "[]") if sink else []:
+            pid = s["properties"].get("application.process.id")
+            on_tv = bool(pid) and bool(shown & set(ancestors(int(pid))))
+            if on_tv != (str(s["sink"]) == sink):
+                pactl("move-sink-input", str(s["index"]), TV_SINK if on_tv else "@DEFAULT_SINK@")
+        time.sleep(1)
+
+
+def move_window(addr, ws):
+    # addr comes from windows() (0x + hex) and ws is a workspace id, so the Lua string is safe.
+    hypr("eval", f"hl.dispatch(hl.dsp.window.move({{ window = 'address:{addr}', workspace = '{ws}', follow = false }}))")
+
+
+def mirror(addr):
+    """Put a PC window on TV_MONITOR's visible workspace and stream that monitor (plus its apps' sound) to the TV."""
+    global MEDIA, _mirror_seen, _mirroring
+    if addr not in {w["id"] for w in windows()}:
+        raise ValueError("window not found")
+    mon = monitors().get(TV_MONITOR)
+    if not mon:
+        raise ValueError(f"monitor {TV_MONITOR} is not connected")
+    if f"\t{TV_SINK}\t" not in pactl("list", "short", "sinks"):
+        pactl("load-module", "module-null-sink", f"sink_name={TV_SINK}", "sink_properties=device.description=TV")
+    move_window(addr, mon["activeWorkspace"]["id"])
+    _mirror_seen = time.monotonic()  # gives the TV time to connect before route_audio() gives up
+    if not _mirroring:
+        _mirroring = True  # before the thread starts: it exits as soon as it sees this False
+        threading.Thread(target=route_audio, daemon=True).start()
+    title = f"PC screen ({TV_MONITOR})"
+    # Another window sent while the TV is already showing the monitor: no need to restart the stream.
+    if MEDIA["src"] != "screen" or status()["state"] not in ("PLAYING", "TRANSITIONING"):
+        MEDIA = {"src": "screen", "is_file": False, "audio": None, "sub": None, "pipe": True, "title": title}
+        cast(f"{media_base()}/pipe{time.monotonic_ns()}.ts", title, "video/mpeg")
+    return title
+
+
+def unmirror():
+    """Stop sending the PC's sound to the TV."""
+    global _mirroring
+    _mirroring = False
+    # Dropping the sink sends its streams back to the PC's default output.
+    for ln in pactl("list", "short", "modules").splitlines():
+        if f"sink_name={TV_SINK}" in ln:
+            pactl("unload-module", ln.split("\t")[0])
+
+
+def start(src, audio=None, sub=None):
+    """Play a file path or URL on the TV. audio/sub are track indexes (None = TV default / no subs)."""
+    global MEDIA
+    is_file = not src.startswith(("http://", "https://"))
+    if not is_file:
+        src = local_url(src)
+    srt = None
+    if sub is not None:
+        out = subprocess.run(["ffmpeg", "-v", "error", *ff_input(src), "-map", f"0:s:{sub}", "-f", "srt", "-"],
+                             capture_output=True, timeout=300)
+        if out.returncode or not out.stdout:
+            raise ValueError("couldn't extract that subtitle")
+        srt = out.stdout
+    MEDIA = {"src": src, "is_file": is_file, "audio": audio or None, "sub": srt, "pipe": bool(audio)}
+    base = media_base()
+    nonce = time.monotonic_ns()  # unique URLs so the TV doesn't reuse a cached stream
+    name = urllib.parse.unquote(urllib.parse.urlparse(src).path.rsplit("/", 1)[-1])
+    title = os.path.splitext(name)[0] or "video"
+    mime = None if is_file or MEDIA["pipe"] else content_type(src)
+    if mime == "text/html":  # a page, not a video: remux the stream yt-dlp finds behind it
+        MEDIA["src"], title = page_video(src)
+        MEDIA["pipe"] = True
+    if MEDIA["pipe"]:
+        url, mime = f"{base}/pipe{nonce}.ts", "video/mpeg"
+    elif is_file:
+        url, mime = f"{base}/{nonce}{os.path.splitext(src)[1]}", mime_for(src)
+    else:
+        url, mime = src, {"video/x-matroska": "video/x-mkv", "video/webm": "video/x-mkv"}.get(mime, mime)
+    MEDIA["title"] = title
+    cast(url, title, mime, f"{base}/{nonce}.srt" if srt else None)
+    return title
+
+
+def play(src):
+    if not src.startswith(("http://", "https://")):
+        src = os.path.abspath(src)
+        if not os.path.isfile(src):
+            sys.exit(f"file not found: {src}")
+    print(f"playing on the TV: {start(src)}\nkeep this terminal open; Ctrl+C to stop", flush=True)
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        soap("Stop", "")
+
+
+WEB_PORT = int(os.environ.get("WEB_PORT", 8765))
+VIDEO_DIR = pathlib.Path(os.path.expanduser(os.environ.get("VIDEO_DIR", "~/Downloads")))
+VIDEO_EXT = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".webm", ".ts"}
+
+# Read on every request so page edits show up without restarting the service.
+PAGE_FILE = pathlib.Path(os.path.realpath(__file__)).parent / "page.html"
+FAVICON_FILE = pathlib.Path(os.path.realpath(__file__)).parent / "favicon.png"
+ICON_FILE = pathlib.Path(os.path.realpath(__file__)).parent / "icon.png"
+MANIFEST_FILE = pathlib.Path(os.path.realpath(__file__)).parent / "manifest.json"
+
+
+_last_find = 0.0
+
+
+STREMIO_CACHES = (pathlib.Path.home() / ".var/app/com.stremio.Stremio/.stremio-server/stremio-cache",
+                  pathlib.Path.home() / ".stremio-server/stremio-cache")
+
+
+def videos():
+    return sorted(str(p.relative_to(VIDEO_DIR)) for p in VIDEO_DIR.rglob("*")
+                  if p.suffix.lower() in VIDEO_EXT and p.is_file())
+
+
+def stremio_stream():
+    """Active torrent stream on the PC (Stremio's local engine on :11470), ready to cast."""
+    try:
+        stats = json.load(urllib.request.urlopen("http://127.0.0.1:11470/stats.json", timeout=0.3))
+    except (OSError, ValueError):
+        return None
+    best = None
+    for ih, e in stats.items():
+        if not isinstance(e, dict) or len(ih) != 40 or not isinstance(e.get("files"), list):
+            continue
+        vids = [(i, f) for i, f in enumerate(e["files"])
+                if isinstance(f, dict) and os.path.splitext(str(f.get("name", "")))[1].lower() in VIDEO_EXT]
+        open_vids = [(i, f) for i, f in vids if f.get("__cacheEvents")]
+        for i, f in (open_vids or vids):
+            mtime = max((p.stat().st_mtime for d in STREMIO_CACHES if (p := d / ih.lower() / str(i)).is_file()), default=0.0)
+            score = (bool(e.get("selections")), bool(f.get("__cacheEvents")), mtime, int(f.get("length") or 0), i)
+            name = urllib.parse.quote(os.path.basename(str(f.get("name", ""))))
+            url = f"http://127.0.0.1:11470/{ih.lower()}/{i}/{name}"
+            if best is None or score > best[0]:
+                best = (score, url)
+    return best[1] if best else None
+
+
+class WebHandler(http.server.BaseHTTPRequestHandler):
+    def reply(self, code, body, ctype="text/plain; charset=utf-8"):
+        data = body if isinstance(body, bytes) else body.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        if self.path == "/":
+            self.reply(200, PAGE_FILE.read_text(), "text/html; charset=utf-8")
+        elif self.path in ("/favicon.png", "/favicon.ico"):
+            f = FAVICON_FILE if FAVICON_FILE.is_file() else ICON_FILE
+            if f.is_file():
+                self.reply(200, f.read_bytes(), "image/png")
+            else:
+                self.reply(404, "icon not found")
+        elif self.path in ("/icon.png", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
+            if ICON_FILE.is_file():
+                self.reply(200, ICON_FILE.read_bytes(), "image/png")
+            else:
+                self.reply(404, "icon not found")
+        elif self.path == "/manifest.json":
+            if MANIFEST_FILE.is_file():
+                self.reply(200, MANIFEST_FILE.read_bytes(), "application/manifest+json")
+            else:
+                self.reply(404, "manifest not found")
+        elif self.path == "/status":
+            # Polled every second: never block on rediscovery here, just report.
+            global _last_find
+            try:
+                st = {**status(), **volume()}
+            except OSError:
+                st = {"state": "OFF"}
+                # The TV may be on at a new DHCP address; look for it at most once a minute.
+                if time.monotonic() - _last_find > 60:
+                    _last_find = time.monotonic()
+                    threading.Thread(target=find_tv, daemon=True).start()
+            st["stream"] = stremio_stream()
+            self.reply(200, json.dumps(st), "application/json")
+        elif self.path == "/apps":
+            try:
+                self.reply(200, json.dumps(apps()), "application/json")
+            except (OSError, websocket.WebSocketException, ValueError, KeyError):
+                self.reply(502, "the TV didn't answer — is it on?")
+        elif self.path == "/windows":
+            try:
+                self.reply(200, json.dumps(windows()), "application/json")
+            except (OSError, ValueError, subprocess.SubprocessError):
+                self.reply(502, "couldn't reach Hyprland")
+        elif self.path == "/files":
+            self.reply(200, json.dumps(videos()), "application/json")
+        else:
+            self.reply(404, "not found")
+
+    def do_POST(self):
+        try:
+            data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or "{}")
+            if self.path == "/on":
+                return self.reply(200, "TV is on") if wake() else self.reply(502, "the TV didn't turn on — is 'Power On with Mobile' enabled on it?")
+            ensure_tv()
+            self.reply(200, self.action(self.path, data))
+        except ValueError as e:
+            self.reply(400, str(e))
+        except urllib.error.HTTPError as e:
+            self.reply(502, "the TV refused it (unsupported format?)" if e.code == 500 else f"the TV refused it ({e.code})")
+        except (OSError, websocket.WebSocketException):
+            self.reply(502, "the TV didn't answer — is it on?")
+
+    def action(self, path, d):
+        if path == "/key":
+            if d.get("k") not in KEYS:
+                raise ValueError("invalid key")
+            press(key=KEYS[d["k"]])
+            return ""
+        if path == "/mouse":
+            if d.get("click"):
+                press(key="KEY_ENTER")  # ProcessMouseDevice LeftClick is ignored by this TV; OK clicks at the cursor
+                return ""
+            dx, dy = d.get("dx"), d.get("dy")
+            if not all(isinstance(v, int) and abs(v) <= 2000 for v in (dx, dy)):
+                raise ValueError("invalid movement")
+            press(mouse={"Cmd": "Move", "Position": {"x": dx, "y": dy, "Time": str(int(time.time()))}})
+            return ""
+        if path == "/text":
+            press(text=str(d.get("t", "")))
+            return "text sent"
+        if path == "/app":
+            return f"opening {launch(str(d.get('id', '')))}"
+        if path == "/volume":
+            if not isinstance(d.get("v"), int) or not 0 <= d["v"] <= 100:
+                raise ValueError("invalid volume")
+            volume(d["v"])
+            return ""
+        if path == "/yt":
+            youtube(str(d.get("url", "")))
+            return "opening on YouTube"
+        if path == "/mirror":
+            return f"on the TV: {mirror(str(d.get('w', '')))}"
+        if path == "/stop":
+            soap("Stop", "")
+            if MEDIA["src"] == "screen":
+                unmirror()
+            return "stopped"
+        if path == "/seek":
+            # taps of ±5/±30 are summed in the page before they're sent, so any whole jump up to 10 min
+            if not isinstance(d.get("s"), int) or isinstance(d["s"], bool) or not 0 < abs(d["s"]) <= 600:
+                raise ValueError("invalid jump")
+            return f"position: {seek(d['s'])}"
+        if path == "/seekto":
+            if not isinstance(d.get("t"), int) or d["t"] < 0:
+                raise ValueError("invalid position")
+            return f"position: {seek_to(d['t'])}"
+        if path == "/tracks":
+            return json.dumps(probe(source(d)))
+        if path == "/play":
+            audio, sub = d.get("audio"), d.get("sub")
+            if not all(x is None or isinstance(x, int) and 0 <= x < 100 for x in (audio, sub)):
+                raise ValueError("invalid track")
+            return f"playing: {start(source(d), audio, sub)}"
+        raise ValueError("unknown action")
+
+    def log_message(self, *a):
+        pass
+
+
+def source(d):
+    """Validate what the page asked to play — this page is reachable from the whole LAN."""
+    if d.get("url"):
+        url = str(d["url"]).strip()
+        if url.startswith("magnet:"):
+            raise ValueError("torrent links aren't supported")
+        if url.startswith("stremio:") or "stremio.com/#/detail" in url:
+            raise ValueError("that's the link to the movie page, not to the video")
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("that doesn't look like a video link")
+        return url
+    # Only video files inside VIDEO_DIR.
+    f = (VIDEO_DIR / str(d.get("f", ""))).resolve()
+    if not f.is_relative_to(VIDEO_DIR.resolve()) or f.suffix.lower() not in VIDEO_EXT or not f.is_file():
+        raise ValueError("invalid file")
+    return str(f)
+
+
+def serve():
+    srv = http.server.ThreadingHTTPServer(("0.0.0.0", WEB_PORT), WebHandler)
+    print(f"web remote: http://{my_ip()}:{WEB_PORT}", flush=True)
+    srv.serve_forever()
+
+
+def getkey():
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        ch = sys.stdin.read(1)
+        if ch == "\x1b":
+            ch += sys.stdin.read(2)
+        return ch
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def interactive():
+    ws = connect()
+    print(HELP)
+    while (k := getkey()) not in ("q", "\x03"):
+        if k == "?":
+            print(HELP)
+        elif k == "/":
+            send_text(ws, input("text: "))
+        elif k in INTERACTIVE:
+            send(ws, INTERACTIVE[k])
+
+
+def main(args):
+    if not args:
+        ensure_tv()
+        return interactive()
+    if args[0] in ("-h", "--help", "help"):
+        return print(__doc__ + "\nkeys: " + " ".join(KEYS))
+    if args[0] == "on":
+        return print("TV is on") if wake() else sys.exit("the TV didn't turn on — is 'Power On with Mobile' enabled on it?")
+    ensure_tv()
+    if args[0] == "yt":
+        return youtube(args[1])
+    if args[0] == "serve":
+        return serve()
+    if args[0] == "netflix":
+        return dial("Netflix")
+    if args[0] == "play":
+        return play(" ".join(args[1:]))
+    bad = [a for a in args if a not in KEYS]
+    if bad:
+        sys.exit(f"unknown key: {' '.join(bad)} (see `tv help`)")
+    ws = connect()
+    for a in args:
+        send(ws, KEYS[a])
+        time.sleep(0.3)
+    time.sleep(1)  # closing right after sending makes the TV drop the keys
+    ws.close()
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except urllib.error.HTTPError as e:
+        sys.exit(f"the TV refused the request: {e.read().decode(errors='replace')}")
+    except ValueError as e:
+        sys.exit(str(e))
+    except (OSError, websocket.WebSocketException):
+        sys.exit("the TV didn't answer — is it on and on the Wi-Fi?")

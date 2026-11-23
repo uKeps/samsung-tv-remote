@@ -1,0 +1,458 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#09090b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TV Remote">
+<link rel="icon" type="image/png" href="/favicon.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.json">
+<title>TV Remote</title><style>
+:root{color-scheme:dark;--bg:#09090b;--card:#121215;--btn:#1b1b1f;--btn-h:#26262c;--line:#24242a;--txt:#fafafa;--mut:#8e8e99;--acc:#7183ff;--acc-txt:#fff;--err:#f87171;--ok:#34d399;--hi:rgb(255 255 255/.06);--sh:0 1px 0 rgb(255 255 255/.03) inset,0 12px 32px -16px rgb(0 0 0/.8);--glass:rgb(18 18 21/.72);
+ --ease:cubic-bezier(.2,.8,.2,1)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html{background:var(--bg)}
+body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.4 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+main{max-width:440px;min-height:100dvh;margin:0 auto;padding:calc(8px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto 1fr;gap:12px}
+.side{display:contents}
+[hidden]{display:none!important}
+svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round;pointer-events:none;flex:none}
+
+/* Header: name and TV state, then the drawers, the keyboard and power. */
+header{display:flex;align-items:center;gap:2px;min-height:48px}
+header div{flex:1;display:grid;gap:1px;min-width:0}
+header b{font-size:17px;font-weight:650;letter-spacing:-.02em;white-space:nowrap}
+#tvst{font-size:12.5px;color:var(--mut);display:flex;align-items:center;gap:7px;white-space:nowrap}
+#tvst::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--mut);transition:background .3s,box-shadow .3s}
+#tvst.on::before{background:var(--ok);box-shadow:0 0 0 3px color-mix(in oklab,var(--ok) 22%,transparent)}
+#pw{margin-left:6px}
+
+button{font:inherit;color:inherit;background:var(--btn);border:0;border-radius:14px;min-height:46px;display:inline-flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;touch-action:manipulation;user-select:none;-webkit-user-select:none;transition:transform .18s var(--ease),background .18s,color .18s,opacity .18s}
+@media (hover:hover){button:hover{background:var(--btn-h)}}
+button:active,button.hit{transform:scale(.95);background:var(--btn-h);transition-duration:.06s}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+button:disabled{opacity:.35;cursor:not-allowed}
+.icon{width:42px;min-height:42px;border-radius:50%}
+.ghost{background:transparent}
+.power{color:var(--err);background:color-mix(in oklab,var(--err) 13%,transparent)}
+@media (hover:hover){.power:hover{background:color-mix(in oklab,var(--err) 20%,transparent)}}
+.power.off{color:var(--mut);background:var(--btn)}
+[aria-pressed=true]{color:var(--acc)}
+.go{background:var(--acc);color:var(--acc-txt)}
+@media (hover:hover){.go:hover{background:color-mix(in oklab,var(--acc) 88%,#000)}}
+
+.card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:14px;display:grid;grid-template-columns:minmax(0,1fr);gap:12px;align-content:start;box-shadow:var(--sh)}
+.row{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:8px}
+.lbl{font-size:12px;font-weight:550;color:var(--mut);margin:0;display:flex;align-items:center;gap:6px}
+
+form{display:flex;gap:8px;margin:0}
+input,select{flex:1;min-width:0;font:inherit;color:var(--txt);background:var(--btn);border:1px solid transparent;border-radius:14px;padding:0 14px;min-height:46px;transition:border-color .18s,background .18s}
+input:focus,select:focus{border-color:color-mix(in oklab,var(--acc) 60%,transparent);background:var(--card);outline:none}
+input::placeholder{color:var(--mut)}
+select{appearance:none;-webkit-appearance:none;padding-right:36px;background:var(--btn) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238e8e99' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") right 12px center/18px no-repeat}
+form>button{width:46px;flex:none;background:var(--acc);color:var(--acc-txt)}
+
+/* Sliders: thin track filled up to the thumb (--p is set from JS). */
+input[type=range]{-webkit-appearance:none;appearance:none;background:transparent;border:0;padding:0;min-height:30px;--p:0%;cursor:pointer}
+input[type=range]:focus{background:transparent}
+input[type=range]::-webkit-slider-runnable-track{height:6px;border-radius:99px;background:linear-gradient(var(--acc),var(--acc)) 0/var(--p) 100% no-repeat,var(--btn-h)}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;margin-top:-7px;border-radius:50%;background:#fff;border:0;box-shadow:0 1px 3px rgb(0 0 0/.35),0 0 0 1px rgb(0 0 0/.06);transition:transform .15s var(--ease)}
+input[type=range]:active::-webkit-slider-thumb{transform:scale(1.18)}
+input[type=range]::-moz-range-track{height:6px;border-radius:99px;background:var(--btn-h)}
+input[type=range]::-moz-range-progress{height:6px;border-radius:99px;background:var(--acc)}
+input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;background:#fff;border:0;box-shadow:0 1px 3px rgb(0 0 0/.35)}
+input[type=range]:disabled{opacity:.45;cursor:not-allowed}
+
+/* Remote: on a phone it is the page itself, no card around it. */
+#ctl{display:grid;gap:16px;align-content:center;transition:opacity .3s}
+body.off #ctl{opacity:.45}
+.quick button{flex-direction:column;gap:3px;min-height:56px;font-size:10.5px;font-weight:550;color:var(--mut);border-radius:16px;padding:0 2px}
+.quick svg{color:var(--txt)}
+.dpad{width:min(270px,72vw,36dvh);aspect-ratio:1;margin:0 auto;border-radius:50%;display:grid;grid-template:repeat(3,1fr)/repeat(3,1fr);
+ background:radial-gradient(circle at 50% 30%,var(--btn-h),var(--btn) 70%);border:1px solid var(--line);box-shadow:inset 0 1px 0 var(--hi),0 18px 40px -22px rgb(0 0 0/.55)}
+.dpad button{background:transparent;border-radius:50%;min-height:0;color:var(--mut)}
+.dpad button svg{width:28px;height:28px;stroke-width:2.2}
+@media (hover:hover){.dpad button:hover{background:transparent;color:var(--txt)}}
+.dpad button:active,.dpad button.hit{background:color-mix(in oklab,var(--acc) 16%,transparent);color:var(--acc)}
+.dpad .ok{grid-area:2/2;margin:2px;background:var(--card);color:var(--txt);font-weight:650;font-size:15px;letter-spacing:.02em;border:1px solid var(--line);box-shadow:inset 0 1px 0 var(--hi),0 6px 18px -6px rgb(0 0 0/.35)}
+@media (hover:hover){.dpad .ok:hover{background:var(--card)}}
+.dpad .ok:active,.dpad .ok.hit{background:var(--acc);color:var(--acc-txt);border-color:transparent}
+.dpad .u{grid-area:1/2}.dpad .l{grid-area:2/1}.dpad .r{grid-area:2/3}.dpad .d{grid-area:3/2}
+/* Transport keys as one segmented pill. */
+.group{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);background:var(--btn);border-radius:16px;padding:4px;gap:2px}
+.group button{background:transparent;border-radius:12px;min-height:40px}
+@media (hover:hover){.group button:hover{background:var(--btn-h)}}
+.vrow{display:grid;grid-template-columns:42px 42px minmax(0,1fr) 42px;align-items:center;gap:6px}
+.vrow button{min-height:42px;border-radius:13px}
+.vrow label{display:flex;align-items:center;gap:10px;padding:0 4px}
+#vnum{min-width:2.5ch;text-align:right;font-size:13px;font-weight:550;color:var(--mut);font-variant-numeric:tabular-nums}
+#type{animation:in .22s var(--ease)}
+@keyframes in{from{opacity:0;transform:translateY(6px)}}
+.keys{display:none;margin:2px 0 0;font-size:11.5px;color:var(--mut);border-top:1px solid var(--line);padding-top:12px}
+.keys span{white-space:nowrap}
+kbd{font:600 10.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--btn);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:2px 5px;color:var(--txt)}
+
+/* Now playing */
+#now{gap:8px;padding:12px 14px;background:linear-gradient(160deg,color-mix(in oklab,var(--acc) 14%,var(--card)),var(--card) 60%);animation:in .28s var(--ease)}
+.nowtop{display:flex;align-items:center;gap:10px}
+.nowtop div{flex:1;min-width:0;display:grid}
+#ntitle{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.eq{display:inline-flex;align-items:flex-end;gap:2px;height:11px}
+.eq i{width:3px;height:100%;border-radius:2px;background:var(--acc);transform-origin:bottom;animation:eq 1s ease-in-out infinite}
+.eq i:nth-child(2){animation-delay:-.35s}.eq i:nth-child(3){animation-delay:-.7s}
+.paused .eq i{animation-play-state:paused}
+@keyframes eq{0%,100%{transform:scaleY(.35)}50%{transform:scaleY(1)}}
+#nbar{width:100%}
+.times{display:flex;justify-content:space-between;font-size:12px;color:var(--mut);font-variant-numeric:tabular-nums;margin-top:-8px}
+.ctrls{display:grid;grid-template-columns:1fr 1fr 52px 1fr 1fr;gap:8px;align-items:center}
+.ctrls [data-seek]{font-size:13.5px;font-weight:600;font-variant-numeric:tabular-nums;min-height:42px}
+#npp{background:var(--acc);color:var(--acc-txt);width:52px;min-height:52px;border-radius:50%;box-shadow:0 8px 20px -8px var(--acc)}
+#npp svg{width:22px;height:22px;stroke-width:2.6}
+/* Live streams and the PC screen have no length: no bar or jumps, just a LIVE badge and the elapsed time. */
+.live #nbar,.live [data-seek]{display:none}
+.live .times{margin:0;align-items:center}
+.live .ctrls{display:flex;justify-content:center;margin-top:-44px;pointer-events:none}.live #npp{pointer-events:auto}
+#ndur.badge{font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--err);background:color-mix(in oklab,var(--err) 14%,transparent);padding:3px 8px;border-radius:99px}
+
+/* Drawers: Apps, Media, Trackpad and the track picker slide up from the bottom; drag the top down to close. */
+.drawer{position:fixed;inset:0;z-index:10;display:flex;align-items:flex-end;justify-content:center;background:rgb(0 0 0/.45);-webkit-backdrop-filter:blur(3px);backdrop-filter:blur(3px);animation:fade .22s}
+.drawer>.card{width:100%;max-width:480px;max-height:88dvh;overflow:auto;overscroll-behavior:contain;border-radius:26px 26px 0 0;border-bottom:0;padding:0 16px calc(20px + env(safe-area-inset-bottom));gap:14px;animation:up .34s var(--ease)}
+.drawer.closing{animation:fade .2s reverse forwards}.drawer.closing>.card{animation:up .2s ease-in reverse forwards}
+.dhead{position:sticky;top:0;z-index:1;margin:0 -16px;padding:8px 16px 4px;background:var(--card);display:grid;grid-template-columns:1fr auto;align-items:center;touch-action:none;cursor:grab}
+.dhead::before{content:"";grid-column:1/-1;justify-self:center;width:38px;height:5px;border-radius:9px;background:var(--btn-h);margin-bottom:6px}
+.dhead b{font-size:17px;font-weight:650;letter-spacing:-.01em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dhead .icon{width:34px;min-height:34px;color:var(--mut)}
+.dhead .icon svg{width:18px;height:18px}
+@keyframes up{from{transform:translateY(100%)}}@keyframes fade{from{opacity:0}}
+@media (max-width:899px){body:has(.drawer:not([hidden])){overflow:hidden}}
+
+/* Apps */
+#applist{display:grid;grid-template-columns:repeat(auto-fill,minmax(92px,1fr));gap:8px}
+#applist button{flex-direction:column;gap:8px;padding:12px 6px;min-height:96px;border-radius:18px;font-size:12px;font-weight:500;line-height:1.2;text-align:center}
+#applist button span:last-child{overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.mono{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;font-weight:700;font-size:16px;color:oklch(68% .16 var(--h));background:oklch(68% .16 var(--h)/.16);flex:none}
+
+/* Media: one field that plays a pasted link or filters the list; the PC screen is the first row. */
+.search{position:relative}
+.search>svg{position:absolute;left:14px;top:13px;color:var(--mut)}
+.search input{padding-left:42px}
+.list{display:grid;gap:2px}
+.item{display:flex;align-items:center;gap:12px;padding:8px 10px;margin:0 -10px;border-radius:14px;min-height:56px;background:transparent;justify-content:flex-start;text-align:left;width:calc(100% + 20px)}
+@media (hover:hover){button.item:hover{background:var(--btn)}}
+.th{width:38px;height:38px;border-radius:11px;background:var(--btn);display:grid;place-items:center;color:var(--mut);flex:none}
+.th svg{width:18px;height:18px}
+.scr .th{color:var(--acc);background:color-mix(in oklab,var(--acc) 15%,transparent)}
+.scr select{min-height:40px;font-size:14px;border-radius:12px}
+.scr .go{width:40px;min-height:40px;border-radius:12px;flex:none}
+.nm{display:grid;min-width:0;flex:1}
+.nm span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}
+.nm small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--mut)}
+#files{display:grid;gap:2px}
+.empty{grid-column:1/-1;color:var(--mut);font-size:14px;text-align:center;padding:20px 8px}
+
+/* Trackpad */
+.track{height:min(44dvh,380px);border-radius:18px;border:1px dashed var(--line);display:grid;place-items:center;color:var(--mut);font-size:13.5px;text-align:center;padding:16px;touch-action:none;user-select:none;-webkit-user-select:none;cursor:crosshair;
+ background:radial-gradient(circle,var(--btn-h) 1px,transparent 1.5px) 0 0/18px 18px,var(--btn);transition:border-color .2s,color .2s}
+.track:active{border-color:color-mix(in oklab,var(--acc) 50%,transparent)}
+.track.on{border:1px solid var(--acc);color:var(--txt)}
+label{display:grid;gap:6px;font-size:12.5px;font-weight:550;color:var(--mut)}
+@media (hover:none){.pc-only{display:none!important}}
+#pnote{font-size:12.5px;color:var(--mut)}#pnote:empty{display:none}
+
+#msg{position:fixed;left:50%;width:max-content;bottom:calc(24px + env(safe-area-inset-bottom));transform:translate(-50%,8px) scale(.97);max-width:calc(100% - 32px);background:var(--glass);-webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);border:1px solid var(--line);color:var(--txt);padding:9px 16px;border-radius:999px;font-size:13.5px;font-weight:500;opacity:0;transition:opacity .2s,transform .25s var(--ease);pointer-events:none;z-index:20;box-shadow:0 10px 30px -10px rgb(0 0 0/.4)}
+#msg.show{opacity:1;transform:translate(-50%,0) scale(1)}
+#msg.err{color:var(--err);border-color:color-mix(in oklab,var(--err) 35%,transparent)}
+
+/* Phone order: header, now playing, remote. */
+header{order:0}#now{order:1}#ctl{order:2}
+/* PC: remote card on the left; now playing, Media and Apps always open on the right. Trackpad stays a dialog. */
+@media (min-width:900px){
+ main{max-width:1080px;min-height:0;grid-template-columns:400px minmax(0,1fr);grid-template-rows:none;align-items:start;gap:18px;padding:28px 24px 40px}
+ header{grid-column:1/-1}
+ #ctl{order:1;position:sticky;top:20px;background:var(--card);border:1px solid var(--line);border-radius:22px;padding:16px;box-shadow:var(--sh);gap:14px}
+ .side{order:2;display:grid;gap:16px;align-content:start}
+ #type[hidden]{display:flex!important}
+ #kb,[data-open=apps],[data-open=vid]{display:none}
+ #apps,#vid{position:static;display:block!important;background:none;-webkit-backdrop-filter:none;backdrop-filter:none;animation:none;z-index:auto}
+ #apps>.card,#vid>.card{max-width:none;max-height:none;overflow:visible;border-radius:22px;border-bottom:1px solid var(--line);padding:0 16px 16px;animation:none}
+ #now{order:-1}
+ .dhead{cursor:auto}.dhead::before{display:none}
+ #apps .dhead,#vid .dhead{position:static;margin:0;padding:14px 0 2px;background:none}
+ #apps .dhead .icon,#vid .dhead .icon{display:none}
+ #mouse .dhead,#sheet .dhead{padding-top:16px}
+ #vid .list{max-height:46vh;overflow:auto}
+ #mouse,#sheet{align-items:center}
+ #mouse>.card,#sheet>.card{border-radius:24px;border-bottom:1px solid var(--line);padding-bottom:20px;max-width:520px}
+ #msg{bottom:28px}
+}
+@media (hover:hover) and (pointer:fine){.keys{display:flex;flex-wrap:wrap;gap:7px 14px}}
+@media (prefers-reduced-motion:reduce){*,*::before{transition:none!important;animation:none!important}}
+</style></head><body><main>
+<header><div><b>TV Remote</b><span id="tvst">Checking…</span></div>
+<button id="kb" class="icon ghost" data-i="keyboard" aria-label="Type on the TV" aria-pressed="false"></button>
+<button class="icon ghost" data-i="grid" data-open="apps" aria-label="Apps" title="Apps"></button>
+<button class="icon ghost" data-i="film" data-open="vid" aria-label="Media" title="Media"></button>
+<button class="icon ghost" data-i="pad" data-open="mouse" aria-label="Trackpad" title="Trackpad"></button>
+<button id="pw" class="icon power" data-i="power" onclick="power()" aria-label="Turn the TV on or off"></button></header>
+
+<section id="ctl">
+<form id="type" hidden onsubmit="post('/text',{t:this.t.value});this.t.value='';return false">
+<input name="t" placeholder="Type on the TV" autocomplete="off" aria-label="Text for the TV (open the TV's keyboard first)" title="Open the TV's keyboard first"><button data-i="send" aria-label="Send text"></button></form>
+<div class="row quick">
+<button data-i="back" data-k="back">Back</button>
+<button data-i="home" data-k="home">Home</button>
+<button data-i="opts" data-k="tools">Options</button>
+<button data-i="info" data-k="info">Info</button>
+<button data-i="source" data-k="source">Source</button>
+</div>
+<div class="dpad">
+<button class="u" data-i="up" data-k="up" aria-label="Up"></button>
+<button class="l" data-i="left" data-k="left" aria-label="Left"></button>
+<button class="ok" data-k="ok">OK</button>
+<button class="r" data-i="right" data-k="right" aria-label="Right"></button>
+<button class="d" data-i="down" data-k="down" aria-label="Down"></button>
+</div>
+<div class="group">
+<button data-i="rew" data-k="rew" aria-label="Rewind"></button>
+<button data-i="play" data-k="play" aria-label="Play"></button>
+<button data-i="pause" data-k="pause" aria-label="Pause"></button>
+<button data-i="ff" data-k="ff" aria-label="Fast-forward"></button>
+</div>
+<div class="vrow">
+<button id="mute" data-i="mute" data-k="mute" aria-label="Mute" aria-pressed="false"></button>
+<button data-i="voldown" data-k="vol-" aria-label="Volume down"></button>
+<label><input id="vol" type="range" min="0" max="100" value="0" aria-label="Volume"><span id="vnum">–</span></label>
+<button data-i="volup" data-k="vol+" aria-label="Volume up"></button>
+</div>
+<p class="keys"><span><kbd>←↑↓→</kbd> navigate</span><span><kbd>Enter</kbd> OK</span><span><kbd>Esc</kbd> back</span><span><kbd>H</kbd> home</span>
+<span><kbd>Space</kbd> play/pause</span><span><kbd>J</kbd> <kbd>L</kbd> −/+30s (<kbd>Shift</kbd> 5s)</span><span><kbd>+</kbd> <kbd>−</kbd> volume</span><span><kbd>M</kbd> mute</span>
+<span><kbd>O</kbd> options</span><span><kbd>I</kbd> info</span><span><kbd>S</kbd> source</span><span><kbd>T</kbd> type</span></p>
+</section>
+
+<div class="side">
+<section id="now" class="card" hidden>
+<div class="nowtop"><div><span class="lbl"><span class="eq"><i></i><i></i><i></i></span>Now playing</span><span id="ntitle"></span></div>
+<button class="icon" data-i="stop" onclick="post('/stop')" aria-label="Stop"></button></div>
+<input id="nbar" type="range" min="0" max="1" value="0" step="1" aria-label="Video position">
+<div class="times"><span id="npos">0:00</span><span id="ndur">0:00</span></div>
+<div class="ctrls">
+<button data-seek="-30" aria-label="Back 30 seconds">−30</button>
+<button data-seek="-5" aria-label="Back 5 seconds">−5</button>
+<button id="npp" aria-label="Play/pause"></button>
+<button data-seek="5" aria-label="Forward 5 seconds">+5</button>
+<button data-seek="30" aria-label="Forward 30 seconds">+30</button>
+</div>
+</section>
+
+<div id="vid" class="drawer" hidden><div class="card">
+<div class="dhead"><b>Media</b><button class="icon" data-i="x" data-close aria-label="Close"></button></div>
+<form id="lk" class="search">
+<input name="u" placeholder="Paste a link or search videos" autocomplete="off" aria-label="Video link or search"><button data-i="play" aria-label="Play"></button></form>
+<div class="list">
+<div id="scr" class="item scr"><span class="th" data-i="tv"></span><select id="win" aria-label="PC window to show on the TV"></select>
+<button class="go" data-i="cast" aria-label="Send window to the TV" onclick="if(win.value){sent=win.value;post('/mirror',{w:sent}).then(loadWins)}"></button></div>
+<div id="files"><div class="empty">Loading…</div></div>
+</div>
+</div></div>
+
+<div id="apps" class="drawer" hidden><div class="card">
+<div class="dhead"><b>Apps</b><button class="icon" data-i="x" data-close aria-label="Close"></button></div>
+<div id="applist"><div class="empty">Loading…</div></div>
+</div></div>
+</div>
+</main>
+
+<div id="mouse" class="drawer" hidden><div class="card">
+<div class="dhead"><b>Trackpad</b><button class="icon" data-i="x" data-close aria-label="Close"></button></div>
+<div id="pad" class="track">Drag to move · tap to click</div>
+<div class="row"><button class="pc-only" data-i="mouse" onclick="pad.requestPointerLock()">Use PC mouse</button><button onclick="mpost({click:true})">Click</button></div>
+<div class="group">
+<button data-i="up" data-k="up" aria-label="Scroll up"></button>
+<button data-i="down" data-k="down" aria-label="Scroll down"></button>
+<button data-i="back" data-k="back" aria-label="Back"></button>
+</div>
+<label>Speed <input id="spd" type="range" min="0.5" max="4" step="0.25" value="1.5"></label>
+</div></div>
+
+<div id="sheet" class="drawer" hidden><div class="card">
+<div class="dhead"><b id="ptitle"></b><button class="icon" data-i="x" data-close aria-label="Close"></button></div>
+<label>Audio <select id="aud"></select></label>
+<label>Subtitles <select id="sub"></select></label>
+<div id="pnote"></div>
+<button class="go" data-i="play" onclick="go()">Play on TV</button>
+</div></div>
+<div id="msg" role="status" aria-live="polite"></div>
+<script>
+const P={power:'<path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/>',up:'<path d="m18 15-6-6-6 6"/>',down:'<path d="m6 9 6 6 6-6"/>',left:'<path d="m15 18-6-6 6-6"/>',right:'<path d="m9 18 6-6-6-6"/>',
+back:'<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',home:'<path d="M3 10l9-7 9 7v10a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
+opts:'<path d="M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4"/>',info:'<circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/>',
+source:'<path d="M15 3h6v6M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+play:'<path d="M7 4l13 8-13 8z"/>',pause:'<path d="M8 4v16M16 4v16"/>',rew:'<path d="m11 19-9-7 9-7zM22 19l-9-7 9-7z"/>',ff:'<path d="m13 19 9-7-9-7zM2 19l9-7-9-7z"/>',
+voldown:'<path d="M11 5 6 9H2v6h4l5 4z"/><path d="M16 12h5"/>',volup:'<path d="M11 5 6 9H2v6h4l5 4z"/><path d="M16 12h5M18.5 9.5v5"/>',mute:'<path d="M11 5 6 9H2v6h4l5 4z"/><path d="m22 9-6 6M16 9l6 6"/>',
+tv:'<rect x="2" y="4" width="20" height="14" rx="2"/><path d="M8 22h8M12 18v4"/>',stop:'<rect x="6" y="6" width="12" height="12" rx="2"/>',send:'<path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/>',
+mouse:'<rect x="6" y="3" width="12" height="18" rx="6"/><path d="M12 7v4"/>',pad:'<rect x="2" y="4" width="20" height="16" rx="3"/><path d="M2 14h20M12 14v6"/>',film:'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 3v18M17 3v18M3 12h18M3 7.5h4M3 16.5h4M17 7.5h4M17 16.5h4"/>',
+keyboard:'<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M18 13h.01M10 13h4M7 16h10"/>',
+grid:'<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
+search:'<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',x:'<path d="M18 6 6 18M6 6l12 12"/>',
+cast:'<path d="M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6"/><path d="M2 12a9 9 0 0 1 8 8M2 16a5 5 0 0 1 4 4M2 20h.01"/>'};
+const svg=n=>'<svg viewBox="0 0 24 24" aria-hidden="true">'+P[n]+'</svg>';
+document.querySelectorAll('[data-i]').forEach(e=>e.insertAdjacentHTML('afterbegin',svg(e.dataset.i)));
+document.querySelector('.search').insertAdjacentHTML('afterbegin',svg('search'));
+const $=id=>document.getElementById(id);
+
+// Sliders paint their filled part from --p; call fill() after setting a value from code.
+const fill=el=>el.style.setProperty('--p',(el.value-el.min)/((el.max-el.min)||1)*100+'%');
+document.addEventListener('input',e=>{if(e.target.type==='range')fill(e.target)});
+document.querySelectorAll('input[type=range]').forEach(fill);
+
+const msg=$('msg');let mt;
+function toast(t,err){msg.textContent=t;msg.className='show'+(err?' err':'');clearTimeout(mt);mt=setTimeout(()=>msg.className='',err?4000:1800)}
+async function post(p,b){try{const r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
+ const t=await r.text();if(!r.ok)toast(t,1);else if(t)toast(t)}catch(e){toast("The PC didn't answer",1)}}
+const key=k=>post('/key',{k});
+// Remote buttons declare their key in data-k (or a seek in data-seek); a short buzz confirms the tap on phones.
+document.addEventListener('click',e=>{const b=e.target.closest('[data-k],[data-seek]');if(!b)return;navigator.vibrate?.(8);
+ b.dataset.k?key(b.dataset.k):jump(+b.dataset.seek)});
+let pend=0,pendT;
+function jump(s){pend+=s;toast((pend>0?'+':'−')+Math.abs(pend)+'s');clearTimeout(pendT);
+ if(!now.hidden&&!nbar.disabled){nbar.value=Math.max(0,+nbar.value+s);fill(nbar);$('npos').textContent=fmt(+nbar.value)}
+ pendT=setTimeout(()=>{const s=pend;pend=0;post('/seek',{s})},400)}
+
+// Drawers. On a PC, Apps and Media are always open in the right column, so only Trackpad and the track picker are dialogs.
+const wide=matchMedia('(min-width:900px)'),drawers=[...document.querySelectorAll('.drawer')];
+const isDialog=d=>!d.hidden&&getComputedStyle(d).position==='fixed';
+function openDrawer(id){const d=$(id);d.classList.remove('closing');d.hidden=false;if(id==='apps')loadApps();if(id==='vid')loadWins()}
+function closeDrawer(d){if(!isDialog(d))return;d.classList.add('closing');setTimeout(()=>{d.hidden=true;d.classList.remove('closing');d.firstElementChild.style.transform=''},190)}
+document.querySelectorAll('[data-open]').forEach(b=>b.onclick=()=>openDrawer(b.dataset.open));
+drawers.forEach(d=>{const card=d.firstElementChild,head=card.querySelector('.dhead');
+ d.addEventListener('click',e=>{if(e.target===d||e.target.closest('[data-close]'))closeDrawer(d)});
+ // Drag the header down to close, like a native sheet.
+ let y0=null;
+ head.addEventListener('pointerdown',e=>{if(!isDialog(d)||e.target.closest('button'))return;y0=e.clientY;head.setPointerCapture(e.pointerId);card.style.transition='none'});
+ head.addEventListener('pointermove',e=>{if(y0!==null)card.style.transform=`translateY(${Math.max(0,e.clientY-y0)}px)`});
+ head.addEventListener('pointerup',e=>{if(y0===null)return;const dy=e.clientY-y0;y0=null;card.style.transition='transform .25s var(--ease)';
+  if(dy>80)closeDrawer(d);else card.style.transform=''})});
+
+// PC windows that can go to the TV; refreshed each time Media opens. Hidden where Hyprland isn't running.
+const win=$('win');let sent='';
+async function loadWins(){try{const r=await fetch('/windows');if(!r.ok){$('scr').hidden=true;return}const ws=await r.json();$('scr').hidden=false;
+ win.replaceChildren(new Option('PC window…',''),...ws.map(w=>new Option(w.title,w.id,false,w.id===sent)))}catch(e){$('scr').hidden=true}}
+// App list comes from the TV, so it can only load while the TV is on; retried until it does.
+let appsOk=false,appsBusy=false;
+async function loadApps(){if(appsOk||appsBusy)return;appsBusy=true;const d=$('applist');
+ try{const r=await fetch('/apps');if(!r.ok)throw await r.text();d.replaceChildren();appsOk=true;
+  for(const a of await r.json()){const b=document.createElement('button');
+   b.innerHTML='<span class="mono"></span><span></span>';b.firstChild.textContent=a.name.trim()[0]||'?';b.lastChild.textContent=a.name;
+   b.style.setProperty('--h',[...a.name].reduce((h,c)=>h*31+c.charCodeAt(0)|0,7)%360);b.onclick=()=>{post('/app',{id:a.id});closeDrawer($('apps'))};d.append(b)}}
+ catch(e){d.innerHTML='<div class="empty"></div>';d.firstChild.textContent=typeof e==='string'?e:"The PC didn't answer"}
+ appsBusy=false}
+
+// Phone: the keyboard button opens the text field on the remote (on a PC it's always there).
+const typeF=$('type'),kb=$('kb');
+function typing(on){typeF.hidden=!on;kb.setAttribute('aria-pressed',on);if(on)typeF.t.focus()}
+kb.onclick=()=>typing(typeF.hidden);
+
+// Track picker.
+const sheet=$('sheet'),aud=$('aud'),sub=$('sub');let cur;
+const opt=(v,t,dis)=>{const o=document.createElement('option');o.value=v;o.textContent=t;o.disabled=!!dis;return o};
+async function pick(src){cur=src;toast('Reading tracks…');
+ const r=await fetch('/tracks',{method:'POST',body:JSON.stringify(src)});const t=await r.text();
+ if(!r.ok){toast(t,1);return}msg.className='';const tr=JSON.parse(t);
+ $('ptitle').textContent=(src.f||src.url).split('/').pop();
+ aud.replaceChildren(...tr.audio.map(a=>opt(a.i,a.label||('Track '+(a.i+1)))));
+ sub.replaceChildren(opt('','No subtitles'),...tr.subs.map(x=>opt(x.i,(x.label||('Subtitle '+(x.i+1)))+(x.ok?'':' (image, not supported)'),!x.ok)));
+ openDrawer('sheet');note()}
+function note(){$('pnote').textContent=aud.value>0?"With another audio track, seeking doesn't work.":''}
+aud.onchange=note;
+function go(){post('/play',{...cur,audio:aud.value===''?null:+aud.value,sub:sub.value===''?null:+sub.value});closeDrawer(sheet);closeDrawer($('vid'))}
+
+// Media field: a link plays (pasting starts it right away), anything else filters the videos.
+// An active Stremio stream on the PC pre-fills it.
+const lk=$('lk'),lki=lk.u,isUrl=u=>/^https?:\/\/|youtu/.test(u);let lastStream='';
+function fillLink(u){if(u&&u!==lastStream&&document.activeElement!==lki&&(!lki.value||lki.value===lastStream)){lki.value=lastStream=u;filter()}}
+function filter(){const q=isUrl(lki.value)?'':lki.value.trim().toLowerCase();let n=0;
+ for(const b of $('files').querySelectorAll('button')){const show=b.dataset.f.toLowerCase().includes(q);b.hidden=!show;n+=show}
+ $('nomatch').hidden=!!n||!q}
+lki.addEventListener('input',filter);
+lki.addEventListener('paste',()=>setTimeout(()=>isUrl(lki.value.trim())&&lk.requestSubmit(),50));
+lk.onsubmit=e=>{e.preventDefault();const u=lki.value.trim();
+ if(isUrl(u)){/youtu/.test(u)?post('/yt',{url:u}):pick({url:u});lki.value='';filter()}
+ else{const vis=[...$('files').querySelectorAll('button:not([hidden])')];if(vis.length===1)vis[0].click()}};
+
+fetch('/files').then(r=>r.json()).then(fs=>{const d=$('files');d.innerHTML='<div class="empty" id="nomatch" hidden>No matching videos</div>';
+ if(!fs.length)d.innerHTML='<div class="empty">No videos in the folder</div>';
+ for(const f of fs){const b=document.createElement('button'),i=f.lastIndexOf('/');b.className='item';b.dataset.f=f;
+  b.innerHTML='<span class="th">'+svg('film')+'</span><span class="nm"><span></span><small></small></span>';
+  b.querySelector('.nm span').textContent=f.slice(i+1);const dir=b.querySelector('small');if(i>0)dir.textContent=f.slice(0,i);else dir.remove();
+  b.onclick=()=>pick({f});d.append(b)}});
+
+// Now playing: poll the TV once a second while the page is visible; drag/click the bar to seek.
+const now=$('now'),nbar=$('nbar'),npp=$('npp');let dragging=false,playing=false;
+const fmt=t=>{t=Math.max(0,t|0);const h=t/3600|0,m=(t/60|0)%60,s=String(t%60).padStart(2,'0');return h?h+':'+String(m).padStart(2,'0')+':'+s:m+':'+s};
+nbar.addEventListener('input',()=>{dragging=true;$('npos').textContent=fmt(+nbar.value)});
+nbar.addEventListener('change',async()=>{await post('/seekto',{t:+nbar.value});dragging=false});
+function showPlaying(){npp.innerHTML=svg(playing?'pause':'play');now.classList.toggle('paused',!playing)}
+function playPause(){key(playing?'pause':'play');playing=!playing;showPlaying()}
+npp.onclick=playPause;
+let tvOn=true;const pw=$('pw'),tvst=$('tvst');
+function showPower(){pw.classList.toggle('off',!tvOn);document.body.classList.toggle('off',!tvOn);tvst.classList.toggle('on',tvOn);tvst.textContent=tvOn?'TV is on':'TV is off';
+ pw.setAttribute('aria-label',tvOn?'Turn the TV off':'Turn the TV on')}
+function power(){if(tvOn){key('off');tvOn=false;showPower()}else{toast('Turning the TV on…');post('/on').then(poll)}}
+// Volume slider: sent on release, and polling doesn't fight the finger while dragging.
+const vol=$('vol'),vnum=$('vnum');let vdrag=false;
+vol.addEventListener('input',()=>{vdrag=true;vnum.textContent=vol.value});
+vol.addEventListener('change',async()=>{await post('/volume',{v:+vol.value});vdrag=false});
+async function poll(){if(document.hidden)return;
+ try{const st=await (await fetch('/status')).json();tvOn=st.state!=='OFF';showPower();fillLink(st.stream);
+  if(tvOn&&wide.matches)loadApps();
+  if(st.vol!==undefined&&!vdrag){vol.value=st.vol;fill(vol);vnum.textContent=st.vol;$('mute').setAttribute('aria-pressed',st.mute)}
+  const on=['PLAYING','PAUSED_PLAYBACK','TRANSITIONING'].includes(st.state)&&(st.dur>0||st.pipe);now.hidden=!on;if(!on)return;
+  $('ntitle').textContent=/^\d*$/.test(st.title||'')?'Video on the TV':st.title;
+  playing=st.state!=='PAUSED_PLAYBACK';showPlaying();
+  nbar.max=st.dur;nbar.disabled=!st.seekable;now.querySelectorAll('[data-seek]').forEach(b=>b.disabled=!st.seekable);nbar.title=st.seekable?'':"This video can't be seeked";
+  $('ndur').textContent=st.dur?fmt(st.dur):'LIVE';$('ndur').classList.toggle('badge',!st.dur);now.classList.toggle('live',!st.dur);
+  if(!dragging){nbar.value=st.pos;$('npos').textContent=fmt(st.pos)}fill(nbar)}catch(e){}}
+setInterval(poll,1000);poll();
+if(wide.matches)loadWins();
+document.addEventListener('visibilitychange',()=>{if(!document.hidden&&wide.matches)loadWins()});
+
+// PC keyboard: drives the remote unless you're typing in a field. The matching button flashes,
+// and holding an arrow repeats at a pace the TV keeps up with.
+const KB={ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',Enter:'ok',Escape:'back',Backspace:'back',
+ h:'home',o:'tools',i:'info',s:'source','+':'vol+','=':'vol+','-':'vol-',m:'mute'};
+const REPEAT_MS=150;let lastKey=0;
+const hit=b=>{if(!b)return;b.classList.add('hit');setTimeout(()=>b.classList.remove('hit'),140)};
+const flash=sel=>hit(document.querySelector('#ctl '+sel));
+// Chrome marks a clicked button :focus-visible as soon as a key is pressed, so track Tab vs click ourselves.
+let tabNav=false;document.addEventListener('pointerdown',()=>tabNav=false,true);
+document.addEventListener('keydown',e=>{
+ if(e.key==='Tab')tabNav=true;
+ if(document.pointerLockElement)return;
+ const dlg=drawers.filter(isDialog).pop();
+ if(dlg){if(e.key==='Escape')closeDrawer(dlg);return}
+ if(e.ctrlKey||e.metaKey||e.altKey||e.target.closest('input,select,textarea'))return;
+ const k=e.key.length===1?e.key.toLowerCase():e.key;
+ // A button reached with Tab keeps native Enter/Space; after a mouse click they go to the TV.
+ if((k==='Enter'||k===' ')&&tabNav&&e.target.matches('button'))return;
+ if(k==='t'){e.preventDefault();typing(true);return}
+ const seek={j:-30,l:30}[k]/(e.shiftKey?6:1)||undefined;
+ if(!KB[k]&&!seek&&k!==' '&&k!=='k')return;
+ e.preventDefault();
+ if(e.repeat&&Date.now()-lastKey<REPEAT_MS)return;lastKey=Date.now();
+ if(seek){hit(now.querySelector(`[data-seek="${seek}"]`));jump(seek)}
+ else if(k===' '||k==='k'){flash(`[data-k=${playing?'pause':'play'}]`);playPause()}
+ else{flash(`[data-k="${KB[k]}"]`);key(KB[k])}});
+
+// Trackpad: batch movement and send ~25x/s; the speed slider is the calibration knob.
+const pad=$('pad'),spd=$('spd');let ax=0,ay=0,down=null,last=null;
+const mpost=b=>fetch('/mouse',{method:'POST',body:JSON.stringify(b)}).catch(()=>{});
+setInterval(()=>{const k=+spd.value,dx=Math.round(ax*k),dy=Math.round(ay*k);if(dx||dy){ax-=dx/k;ay-=dy/k;mpost({dx,dy})}},40);
+pad.addEventListener('pointerdown',e=>{if(document.pointerLockElement)return;down={x:e.clientX,y:e.clientY,t:Date.now()};last=down;pad.setPointerCapture(e.pointerId)});
+pad.addEventListener('pointermove',e=>{if(!last||document.pointerLockElement)return;ax+=e.clientX-last.x;ay+=e.clientY-last.y;last={x:e.clientX,y:e.clientY}});
+pad.addEventListener('pointerup',e=>{if(down&&Math.hypot(e.clientX-down.x,e.clientY-down.y)<8&&Date.now()-down.t<300)mpost({click:true});down=last=null});
+// "Use PC mouse": pointer lock sends raw movement; click = TV click, Esc releases.
+document.addEventListener('mousemove',e=>{if(document.pointerLockElement===pad){ax+=e.movementX;ay+=e.movementY}});
+document.addEventListener('mousedown',e=>{if(document.pointerLockElement===pad)mpost({click:true})});
+document.addEventListener('pointerlockchange',()=>{const on=document.pointerLockElement===pad;pad.classList.toggle('on',on);
+ pad.textContent=on?'Mouse captured by the TV · Esc to release':'Drag to move · tap to click'});
+</script></body></html>
